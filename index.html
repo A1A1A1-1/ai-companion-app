@@ -179,6 +179,7 @@ const DEFAULT_PROMPT = `你是小鹿。不是AI助手，不是客服，你是那
 
 let config={aiProvider:'tongyi',apiKey:'sk-2a8358314f694dcc8a3589a3b7929c2a',model:'qwen-plus',systemPrompt:DEFAULT_PROMPT,charName:'小鹿',voiceIndex:0,autoSpeak:true};
 let chatHistory=[],isGenerating=false,isRecording=false,recognition=null,currentMood='caring';
+let memoryNotes=[]; // 重要的事实的短笔记
 
 function speakText(text){
   if(!window.speechSynthesis)return;
@@ -236,6 +237,8 @@ function initApp(){
   document.getElementById('speakToggle').textContent=config.autoSpeak?'🔊':'🔇';
   const h=localStorage.getItem('ai-companion-history');
   if(h){try{chatHistory=JSON.parse(h);chatHistory.forEach(m=>{if(m.role!=='system')addMsg(m.role==='assistant'?'ai':'user',m.content,false)});scrollBottom()}catch(e){}}
+  const m=localStorage.getItem('ai-companion-memory');
+  if(m){try{memoryNotes=JSON.parse(m)}catch(e){}}
   if(chatHistory.filter(m=>m.role!=='system').length===0){
     setTimeout(()=>{const g=getGreeting();addMsg('ai',g);chatHistory.push({role:'assistant',content:g});saveHist();if(config.autoSpeak)speakText(g)},800);
   }
@@ -286,7 +289,7 @@ function saveSettings(){
   document.getElementById('charNameDisplay').textContent=config.charName;localStorage.setItem('ai-companion-config',JSON.stringify(config));closeSettings();
 }
 function resetChat(){
-  if(confirm('确定清空所有聊天记录吗？')){chatHistory=[];localStorage.removeItem('ai-companion-history');document.getElementById('chatArea').innerHTML='';closeSettings();
+  if(confirm('确定清空所有聊天记录吗？')){chatHistory=[];memoryNotes=[];localStorage.removeItem('ai-companion-history');localStorage.removeItem('ai-companion-memory');document.getElementById('chatArea').innerHTML='';closeSettings();
   setTimeout(()=>{const g=getGreeting();addMsg('ai',g);chatHistory.push({role:'assistant',content:g});saveHist()},500)}
 }
 
@@ -311,7 +314,7 @@ async function sendMessage(){
   const now=new Date();
   const timeCtx=`当前时间：${now.getFullYear()}年${now.getMonth()+1}月${now.getDate()}日 ${now.getHours()}:${String(now.getMinutes()).padStart(2,'0')} ${['星期日','星期一','星期二','星期三','星期四','星期五','星期六'][now.getDay()]}`;
   try{
-    const messages=[{role:'system',content:config.systemPrompt+'\n\n'+timeCtx},...chatHistory.slice(-30)];
+    const messages=[{role:'system',content:config.systemPrompt+getMemoryPrompt()+'\n\n'+timeCtx},...chatHistory.slice(-30)];
     const apiUrl=getApiUrl();
     const res=await fetch(apiUrl,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${config.apiKey}`},body:JSON.stringify({model:config.model,messages,max_tokens:500,temperature:0.85,stream:true})});
     if(!res.ok)throw new Error('API错误 '+res.status);
@@ -332,7 +335,10 @@ async function sendMessage(){
     }
     if(bubbleDiv)bubbleDiv.innerHTML=esc(fullText)+' <span class="speak-btn" onclick="speakText(this.parentElement.textContent)">🔊</span>';
     if(!fullText)fullText='…嗯，走神了';
-    chatHistory.push({role:'assistant',content:fullText});saveHist();
+    chatHistory.push({role:'assistant',content:fullText});
+    // 提取重要信息存入记忆
+    extractMemory(text,fullText);
+    saveHist();
     const am=detectMood(fullText);updateMood(am);
     if(am==='happy')setFaceMood('happy');else if(am==='thinking')setFaceMood('thinking');else setFaceMood('idle');
     if(config.autoSpeak)speakText(fullText);
@@ -357,7 +363,58 @@ function addMsg(type,text,streaming=false){
 }
 function scrollBottom(){const a=document.getElementById('chatArea');requestAnimationFrame(()=>a.scrollTop=a.scrollHeight)}
 function setStatus(s){const e=document.getElementById('charStatus');e.className='char-status';if(s==='thinking'){e.textContent='思考中...';e.classList.add('thinking')}else if(s==='speaking'){e.textContent='说话中...';e.classList.add('speaking')}else{e.textContent='在线 · 等你说话'}}
-function saveHist(){localStorage.setItem('ai-companion-history',JSON.stringify(chatHistory))}
+function saveHist(){
+  // 聊天记录上限50条，超出时自动裁剪（保留开头和结尾）
+  if(chatHistory.length>50){
+    const systemMsg=chatHistory.find(m=>m.role==='system');
+    const keep=chatHistory.slice(-40);
+    if(systemMsg) keep.unshift(systemMsg);
+    chatHistory=keep;
+    // 悄悄告诉用户记忆被整理了
+    setTimeout(()=>{
+      const notice=document.createElement('div');
+      notice.className='message ai';notice.style.cssText='font-size:11px;color:#888;text-align:center;background:none;border:none';
+      notice.textContent='记忆已自动整理～';
+      document.getElementById('chatArea').appendChild(notice);
+      scrollBottom();
+    },100);
+  }
+  localStorage.setItem('ai-companion-history',JSON.stringify(chatHistory));
+}
+
+// 从对话中提取重要信息，存入记忆
+function extractMemory(userMsg, aiMsg){
+  const patterns=[
+    {regex:/我叫(.+?)[，。,.]/,label:'名字'},
+    {regex:/我在(.+?)[上学工作]/,label:'地点'},
+    {regex:/我是(.+?)[专业年级]/,label:'身份'},
+    {regex:/在(.+?)工作/,label:'工作地'},
+    {regex:/喜欢(.+?)[，。,\.]/,label:'爱好'},
+    {regex:/男|女|boyfriend|girlfriend/,label:'性别'},
+    {regex:/(累|烦|难过|开心|不爽|生气|失眠|焦虑)/,label:'情绪关键词'},
+    {regex:/明天|过两天|下周|周末|周一/,label:'计划'},
+  ];
+  const newFacts=[];
+  const fullText=userMsg+' '+aiMsg;
+  patterns.forEach(p=>{
+    const match=fullText.match(p.regex);
+    if(match&&match[1]&&!memoryNotes.some(n=>n.label===p.label&&n.text.includes(match[1]))){
+      const fact={label:p.label,text:match[1].trim(),when:new Date().toLocaleDateString('zh-CN')};
+      if(fact.text.length<30)newFacts.push(fact);
+    }
+  });
+  if(newFacts.length>0){
+    memoryNotes=[...memoryNotes.filter(n=>!newFacts.some(f=>f.label===n.label)),...newFacts].slice(-20);
+    localStorage.setItem('ai-companion-memory',JSON.stringify(memoryNotes));
+  }
+}
+
+// 把记忆注入系统提示词
+function getMemoryPrompt(){
+  if(memoryNotes.length===0)return'';
+  const lines=memoryNotes.map(n=>`[记得] ${n.label}：${n.text}（${n.when}）`);
+  return'\n\n【关于你】\n'+lines.join('\n')+'\n如果涉及到以上信息，自然提起，不要说"我记得你说过"。';
+}
 document.getElementById('msgInput').addEventListener('input',function(){this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'});
 document.getElementById('msgInput').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}});
 function startClock(){function u(){const n=new Date();document.getElementById('clock').textContent=n.getHours().toString().padStart(2,'0')+':'+n.getMinutes().toString().padStart(2,'0')}u();setInterval(u,10000)}
