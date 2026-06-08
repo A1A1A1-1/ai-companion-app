@@ -171,10 +171,16 @@ function speakText(text){
   window.speechSynthesis.cancel();
   const clean=text.replace(/[🔊🔘📌💡✨🌟💫🎉🎊🎁🦌💝😘😊😜🤔😔😢😭❤️💕💖]/g,'');
   const u=new SpeechSynthesisUtterance(clean);
-  u.lang='zh-CN';u.rate=1.0;u.pitch=1.15;
+  u.lang='zh-CN';u.rate=0.88;u.pitch=1.25;u.volume=0.9;
   const voices=speechSynthesis.getVoices();
   const zh=voices.filter(v=>v.lang.startsWith('zh'));
-  if(zh.length>0)u.voice=zh[Math.min(parseInt(config.voiceIndex)||0,zh.length-1)];
+  if(zh.length>0){
+    // 优先选温柔女声（含关键词：female/wirl/xiaoyan/tingting/xiaoxiao）
+    let picked=zh.find(v=>/female|girl|xiaoyan|tingting|xiaoxiao|zhixiaoxia|zhixiaoyao/i.test(v.name));
+    if(!picked)picked=zh.find(v=>/女|female/i.test(v.name));
+    if(!picked)picked=zh[Math.min(parseInt(config.voiceIndex)||0,zh.length-1)];
+    u.voice=picked;
+  }
   u.onend=()=>{setStatus('idle');setFaceMood('idle')};
   speechSynthesis.speak(u);
 }
